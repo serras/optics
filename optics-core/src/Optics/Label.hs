@@ -7,12 +7,31 @@
 -- a prefix @#@ sign followed by an identifier, e.g. @#foo@.  These expressions
 -- can then be given an interpretation that depends on the type at which they
 -- are used and the text of the label.
+module Optics.Label
+  ( -- * 'LabelOptic' type class
+    LabelOptic(..)
+  , LabelOptic'
+    -- * Sample usage
+    -- $sampleUsage
+
+    -- * How to use labels as optics to make working with Haskell's records more convenient
+    -- $guide
+
+    -- * Technical details
+
+    -- ** Structure of 'LabelOptic' instances
+    -- $instanceStructure
+
+    -- ** Limitations arising from functional dependencies
+    -- $fundepLimitations
+  ) where
+
+import Optics.Internal.Optic
+
+-- $sampleUsage
 --
--- The following example shows how overloaded labels can be used as optics.
---
--- == Example
---
--- Consider the following:
+-- #usage#
+-- An example showing how overloaded labels can be used as optics.
 --
 -- >>> :set -XDataKinds
 -- >>> :set -XFlexibleContexts
@@ -87,9 +106,196 @@
 --
 -- >>> peter & set #pets []
 -- Human {humanName = "Peter", humanAge = 13, humanPets = []}
+
+-- $guide
 --
+-- == The problem
 --
--- == Structure of 'LabelOptic' instances
+-- Standard Haskell records are a common source of frustration amongst seasoned
+-- Haskell programmers. Their main issues are:
+--
+-- 1) Pollution of global namespace as every field accessor is also a top-level
+--    function.
+--
+-- 2) Inability to define multiple data types sharing field names in the same
+--    module.
+--
+-- 3) Clunky update syntax, especially when nested fields get involved.
+--
+-- Over the years multiple language extensions were proposed and implemented to
+-- alleviate these issues. We're quite close to having a reasonable solution
+-- with the following trifecta:
+--
+-- - <https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/glasgow_exts.html#extension-DuplicateRecordFields DuplicateRecordFields> - introduced in GHC 8.0.1, addresses (2)
+--
+-- - <https://github.com/ghc-proposals/ghc-proposals/pull/160 NoFieldSelectors> - accepted GHC proposal, addresses (1)
+--
+-- - <https://github.com/ghc-proposals/ghc-proposals/pull/282 RecordDotSyntax> - accepted GHC proposal, addresses (3)
+--
+-- It needs to be noted however that both NoFieldSelectors and RecordDotSyntax
+-- are not yet implemented, with the latter depending on adding setField to
+-- HasField (<https://gitlab.haskell.org/ghc/ghc/issues/16232 ghc/16232>), also not
+-- yet implemented.
+--
+-- Is there no hope then for people who would like to work with records in a
+-- reasonable way without waiting for these extensions? Not necessarily, as by
+-- following a couple of simple patterns we can get pretty much the same (and
+-- more) features with labels as optics, just with a slightly more verbose
+-- syntax.
+--
+-- == The solution
+--
+-- === Prefixless fields with DuplicateRecordFields
+--
+-- If we look at section showing sample usage, you'll see that field names were
+-- prefixed with full name of a data type, whereas defined labels were
+-- prefixless. This is the simplest approach of using labels as optics that does
+-- not require usage of DuplicateRecordFields, but not the optimal one. We
+-- necessarily want field names to be prefixless, i.e. @field@ to be a field
+-- name and @#field@ to be an overloaded label that becomes an optic refering to
+-- this field in the appropriate context.
+--
+-- With this approach we get a working
+--
+-- - autocompletion and
+--
+-- - jump-to-definition
+--
+-- in editors supporting ctags/etags in combination with
+-- <https://hackage.haskell.org/package/hasktags hasktags>, both of which
+-- (especially the latter) are very important for developer's productivity in
+-- real-world code bases.
+--
+-- To illustrate let's look at data types defined with this approach in mind:
+--
+-- @
+-- {-\# LANGUAGE DuplicateRecordFields \#-}
+--
+-- import Data.Time
+--
+-- data User = User { id     :: Int
+--                  , name   :: String
+--                  , joined :: UTCTime
+--                  , movies :: [Movie]
+--                  }
+--
+-- data Movie = Movie { id          :: Int
+--                    , name        :: String
+--                    , releaseDate :: UTCTime
+--                    }
+-- @
+--
+-- Then appropriate 'LabelOptic' instances can be either written by hand or
+-- generated using Template Haskell functions (defined in @Optics.TH@ module
+-- from @optics-th@ package) with
+--
+-- @
+-- makeFieldLabelsWith noPrefixFieldLabels ''User
+-- makeFieldLabelsWith noPrefixFieldLabels ''Movie
+-- @
+--
+-- /Note:/ there exists a similar approach that involves prefixing field names
+-- with the underscore and generation of lenses as ordinary functions so that
+-- @_field@ is the ordinary field name and @field@ is the lens referencing
+-- it. The drawback of such solution is inability to get working
+-- jump-to-definition for field names, which makes navigation in unfamiliar code
+-- bases significantly harder, so it's not recommended.
+--
+-- === Emulation of NoFieldSelectors
+--
+-- Prefixless fields (especially ones with common names such as @id@ or @name@)
+-- leak into global namespace as accessor functions and can generate a lot of
+-- name clashes. Before NoFieldSelectors is available, this can be alleviated by
+-- splitting modules defining types into two, namely:
+--
+-- 1) A private one that exports full type definitions, i.e. with their fields
+-- and constructors.
+--
+-- 2) A public one that exports only constructors (or no constructors at all if
+-- the data type in question is opaque).
+--
+-- There is no notion of private and public modules within a single cabal
+-- target, but we can hint at it e.g. by naming the public module @T@ and
+-- private @T.Internal@.
+--
+-- An example:
+--
+-- Private module:
+--
+-- @
+-- module User.Internal (User(..)) where
+--
+-- import Optics.TH
+--
+-- data User = User { id   :: Int
+--                  , name :: String
+--                  }
+--
+-- makeFieldLabelsWith noPrefixFieldLabels ''User
+--
+-- ...
+-- @
+--
+-- Public module:
+--
+-- @
+-- module User (User(User)) where
+--
+-- import User.Internal
+--
+-- ...
+-- @
+--
+-- Then, whenever we're dealing with a value of type @User@ and want to read or
+-- modify its fields, we can use corresponding labels without having to import
+-- @User.Internal@. Importing @User@ is enough because it provides appropriate
+-- @LabelOptic@ instances through @User.Internal@ which enables labels to be
+-- interpreted as optics in the appropriate context.
+--
+-- @
+-- import User
+--
+-- greetUser :: User -> String
+-- greetUser user = "Hello " ++ user ^. #name ++ "!"
+--
+-- addSurname :: String -> User -> User
+-- addSurname surname user = user & #name %~ (++ " " ++ surname)
+-- @
+--
+-- But what if we want to create a new @User@ with the record syntax? Importing
+-- @User@ module is not sufficient since it doesn't export @User@'s
+-- fields. However, if we import @User.Internal@ /fully qualified/ and make use
+-- of the fact that field names used within the record syntax don't have to be
+-- prefixed, it works out:
+--
+-- @
+-- import User
+-- import qualified User.Internal
+--
+-- newUser :: User
+-- newUser = User { id   = 1     -- not User.Internal.id
+--                , name = \"Ian\" -- not User.Internal.name
+--                }
+-- @
+--
+-- This way top-level field accessor functions stay in their own qualified
+-- namespace and don't generate name clashes, yet they can be used without
+-- prefix within the record syntax.
+--
+-- == The result
+--
+-- When we follow the above conventions for data types in our application, we
+-- get:
+--
+-- 1) Prefixless field names that don't pollute global namespace (with the
+-- internal module qualification trick).
+--
+-- 2) Working tags based jump-to-definition for field names (as @field@ is the
+-- ordinary field, whereas @#field@ is the lens referencing it).
+--
+-- 3) Full power of optics at our disposal, should we ever need it.
+
+-- $instanceStructure
 --
 -- You might wonder why instances above are written in form
 --
@@ -180,8 +386,8 @@
 --     • In the expression: #age :: Iso' Human Int
 --       In an equation for ‘age’: age = #age :: Iso' Human Int
 -- @
---
--- == Limitations arising from functional dependencies
+
+-- $fundepLimitations
 --
 -- 'LabelOptic' uses the following functional dependencies to guarantee good
 -- type inference:
@@ -210,13 +416,6 @@
 --
 -- - Modify type parameters of type @s@ or @t@ if @a@ or @b@ contain ambiguous
 --   applications of type families to these type parameters.
---
-module Optics.Label
-  ( LabelOptic(..)
-  , LabelOptic'
-  ) where
-
-import Optics.Internal.Optic
 
 -- $setup
 -- >>> import Optics.Core
